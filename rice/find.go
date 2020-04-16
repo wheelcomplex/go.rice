@@ -11,14 +11,30 @@ import (
 	"strings"
 )
 
+func badArgument(fileset *token.FileSet, p token.Pos) {
+	pos := fileset.Position(p)
+	filename := pos.Filename
+	base, err := os.Getwd()
+	if err == nil {
+		rpath, perr := filepath.Rel(base, pos.Filename)
+		if perr == nil {
+			filename = rpath
+		}
+	}
+	msg := fmt.Sprintf("%s:%d: Error: found call to rice.FindBox, "+
+		"but argument must be a string literal.\n", filename, pos.Line)
+	fmt.Println(msg)
+	os.Exit(1)
+}
+
 func findBoxes(pkg *build.Package) map[string]bool {
+	// create map of boxes to embed
+	var boxMap = make(map[string]bool)
+
 	// create one list of files for this package
 	filenames := make([]string, 0, len(pkg.GoFiles)+len(pkg.CgoFiles))
 	filenames = append(filenames, pkg.GoFiles...)
 	filenames = append(filenames, pkg.CgoFiles...)
-
-	// create map of boxes to embed
-	var boxMap = make(map[string]bool)
 
 	// loop over files, search for rice.FindBox(..) calls
 	for _, filename := range filenames {
@@ -63,29 +79,57 @@ func findBoxes(pkg *build.Package) map[string]bool {
 		// Identifiers won't be resolved.
 		var nextIdentIsBoxFunc bool
 		var nextBasicLitParamIsBoxName bool
+		var boxCall token.Pos
+		var validVariablesForBoxes = make(map[string]bool)
+
 		ast.Inspect(f, func(node ast.Node) bool {
 			if node == nil {
 				return false
 			}
 			switch x := node.(type) {
+			// this case fixes the var := func() style assignments, not assignments to vars declared separately from the assignment.
+			case *ast.AssignStmt:
+				var assign = node.(*ast.AssignStmt)
+				name, found := assign.Lhs[0].(*ast.Ident)
+				if found {
+					composite, first := assign.Rhs[0].(*ast.CompositeLit)
+					if first {
+						riceSelector, second := composite.Type.(*ast.SelectorExpr)
+
+						if second {
+							callCorrect := riceSelector.Sel.Name == "Config"
+							packageName, third := riceSelector.X.(*ast.Ident)
+
+							if third && callCorrect && packageName.Name == ricePkgName {
+								validVariablesForBoxes[name.Name] = true
+								verbosef("\tfound variable, saving to scan for boxes: %q\n", name.Name)
+							}
+						}
+					}
+				}
 			case *ast.Ident:
 				if nextIdentIsBoxFunc || ricePkgName == "." {
 					nextIdentIsBoxFunc = false
 					if x.Name == "FindBox" || x.Name == "MustFindBox" {
 						nextBasicLitParamIsBoxName = true
+						boxCall = x.Pos()
 					}
 				} else {
-					if x.Name == ricePkgName {
+					if x.Name == ricePkgName || validVariablesForBoxes[x.Name] {
 						nextIdentIsBoxFunc = true
 					}
 				}
 			case *ast.BasicLit:
-				if nextBasicLitParamIsBoxName && x.Kind == token.STRING {
-					nextBasicLitParamIsBoxName = false
-					// trim "" or ``
-					name := x.Value[1 : len(x.Value)-1]
-					boxMap[name] = true
-					verbosef("\tfound box %q\n", name)
+				if nextBasicLitParamIsBoxName {
+					if x.Kind == token.STRING {
+						nextBasicLitParamIsBoxName = false
+						// trim "" or ``
+						name := x.Value[1 : len(x.Value)-1]
+						boxMap[name] = true
+						verbosef("\tfound box %q\n", name)
+					} else {
+						badArgument(fset, boxCall)
+					}
 				}
 
 			default:
@@ -93,7 +137,7 @@ func findBoxes(pkg *build.Package) map[string]bool {
 					nextIdentIsBoxFunc = false
 				}
 				if nextBasicLitParamIsBoxName {
-					nextBasicLitParamIsBoxName = false
+					badArgument(fset, boxCall)
 				}
 			}
 			return true

@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/GeertJohan/go.rice/embedded"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/GeertJohan/go.rice/embedded"
 )
 
 // Box abstracts a directory for resources/files.
@@ -66,6 +67,23 @@ func findBox(name string, order []LocateMethod) (*Box, error) {
 				continue
 			}
 			return b, nil
+		case LocateWorkingDirectory:
+			// resolve absolute directory path
+			err := b.resolveAbsolutePathFromWorkingDirectory()
+			if err != nil {
+				continue
+			}
+			// check if absolutePath exists on filesystem
+			info, err := os.Stat(b.absolutePath)
+			if err != nil {
+				continue
+			}
+			// check if absolutePath is actually a directory
+			if !info.IsDir() {
+				err = errors.New("given name/path is not a directory")
+				continue
+			}
+			return b, nil
 		}
 	}
 
@@ -104,6 +122,14 @@ var resolveAbsolutePathFromCaller = func(name string, nStackFrames int) (string,
 
 	// resolve to proper path
 	pkgDir := filepath.Dir(callingGoFile)
+	// fix for go cover
+	const coverPath = "_test/_obj_test"
+	if !filepath.IsAbs(pkgDir) {
+		if i := strings.Index(pkgDir, coverPath); i >= 0 {
+			pkgDir = pkgDir[:i] + pkgDir[i+len(coverPath):]            // remove coverPath
+			pkgDir = filepath.Join(os.Getenv("GOPATH"), "src", pkgDir) // make absolute
+		}
+	}
 	return filepath.Join(pkgDir, name), nil
 }
 
@@ -115,6 +141,15 @@ func (b *Box) resolveAbsolutePathFromCaller() error {
 	b.absolutePath = path
 	return nil
 
+}
+
+func (b *Box) resolveAbsolutePathFromWorkingDirectory() error {
+	path, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	b.absolutePath = filepath.Join(path, b.name)
+	return nil
 }
 
 // IsEmbedded indicates wether this box was embedded into the application
@@ -135,7 +170,9 @@ func (b *Box) Time() time.Time {
 		return b.embed.Time
 	}
 
-	//++ TODO: return time for appended box
+	if b.IsAppended() {
+		return b.appendd.Time
+	}
 
 	return time.Now()
 }
@@ -242,51 +279,18 @@ func (b *Box) Open(name string) (*File, error) {
 
 // Bytes returns the content of the file with given name as []byte.
 func (b *Box) Bytes(name string) ([]byte, error) {
-	// check if box is embedded
-	if b.IsEmbedded() {
-		// find file in embed
-		ef := b.embed.Files[name]
-		if ef == nil {
-			return nil, os.ErrNotExist
-		}
-		// clone byteSlice
-		cpy := make([]byte, 0, len(ef.Content))
-		cpy = append(cpy, ef.Content...)
-		// return copied bytes
-		return cpy, nil
-	}
-
-	// check if box is appended
-	if b.IsAppended() {
-		af := b.appendd.Files[name]
-		if af == nil {
-			return nil, os.ErrNotExist
-		}
-		rc, err := af.zipFile.Open()
-		if err != nil {
-			return nil, err
-		}
-		cpy, err := ioutil.ReadAll(rc)
-		if err != nil {
-			return nil, err
-		}
-		rc.Close()
-		return cpy, nil
-	}
-
-	// open actual file from disk
-	file, err := os.Open(filepath.Join(b.absolutePath, name))
+	file, err := b.Open(name)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	// read complete content
-	bts, err := ioutil.ReadAll(file)
+
+	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		return nil, err
 	}
-	// return result
-	return bts, nil
+
+	return content, nil
 }
 
 // MustBytes returns the content of the file with given name as []byte.
@@ -301,7 +305,7 @@ func (b *Box) MustBytes(name string) []byte {
 
 // String returns the content of the file with given name as string.
 func (b *Box) String(name string) (string, error) {
-	// check if box is embedded
+	// check if box is embedded, optimized fast path
 	if b.IsEmbedded() {
 		// find file in embed
 		ef := b.embed.Files[name]
@@ -312,27 +316,10 @@ func (b *Box) String(name string) (string, error) {
 		return ef.Content, nil
 	}
 
-	// check if box is apended
-	if b.IsAppended() {
-		bts, err := b.Bytes(name)
-		if err != nil {
-			return "", err
-		}
-		return string(bts), nil
-	}
-
-	// open actual file from disk
-	file, err := os.Open(filepath.Join(b.absolutePath, name))
+	bts, err := b.Bytes(name)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
-	// read complete content
-	bts, err := ioutil.ReadAll(file)
-	if err != nil {
-		return "", err
-	}
-	// return result as string
 	return string(bts), nil
 }
 
@@ -344,4 +331,9 @@ func (b *Box) MustString(name string) string {
 		panic(err)
 	}
 	return str
+}
+
+// Name returns the name of the box
+func (b *Box) Name() string {
+	return b.name
 }

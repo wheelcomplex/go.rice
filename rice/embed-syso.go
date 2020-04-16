@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
-	"github.com/GeertJohan/go.rice/embedded"
-	"github.com/akavel/rsrc/coff"
 	"go/build"
 	"io"
 	"io/ioutil"
@@ -14,8 +12,12 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
-	"time"
+
+	"github.com/GeertJohan/go.rice/embedded"
+	"github.com/akavel/rsrc/coff"
 )
+
+const sysoBoxSuffix = ".rice-box.syso"
 
 type sizedReader struct {
 	*bytes.Reader
@@ -93,10 +95,17 @@ func operationEmbedSyso(pkg *build.Package) {
 		verbosef("embedding box '%s'\n", boxname)
 		verbosef("\tto file %s\n", boxFilename)
 
+		// read box metadata
+		boxInfo, ierr := os.Stat(boxPath)
+		if ierr != nil {
+			fmt.Printf("Error: unable to access box at %s\n", boxPath)
+			os.Exit(1)
+		}
+
 		// create box datastructure (used by template)
 		box := &embedded.EmbeddedBox{
 			Name:      boxname,
-			Time:      time.Now(),
+			Time:      boxInfo.ModTime(),
 			EmbedType: embedded.EmbedTypeSyso,
 			Files:     make(map[string]*embedded.EmbeddedFile),
 			Dirs:      make(map[string]*embedded.EmbeddedDir),
@@ -126,7 +135,7 @@ func operationEmbedSyso(pkg *build.Package) {
 					parentDir := box.Dirs[strings.Join(pathParts[:len(pathParts)-1], "/")]
 					parentDir.ChildDirs = append(parentDir.ChildDirs, embeddedDir)
 				}
-			} else {
+			} else if !generated(filename) {
 				embeddedFile := &embedded.EmbeddedFile{
 					Filename:    filename,
 					FileModTime: info.ModTime(),
@@ -189,7 +198,7 @@ func createCoffSyso(boxFilename string, symname string, arch string, data []byte
 	boxCoff.AddData("_bricebox_"+symname, sizedReader{bytes.NewReader(data)})
 	boxCoff.AddData("_ericebox_"+symname, io.NewSectionReader(strings.NewReader("\000\000"), 0, 2)) // TODO: why? copied from rsrc, which copied it from as-generated
 	boxCoff.Freeze()
-	err := writeCoff(boxCoff, boxFilename+"_"+arch+".rice-box.syso")
+	err := writeCoff(boxCoff, boxFilename+"_"+arch+sysoBoxSuffix)
 	if err != nil {
 		fmt.Printf("error writing %s coff/.syso: %v\n", arch, err)
 		os.Exit(1)
